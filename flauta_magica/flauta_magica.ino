@@ -1,123 +1,93 @@
 /*********************************************************
   Flauta Magica
 **********************************************************/
-#include "M16.h"
+// M16 Sinewave example
+#include "M16.h" 
 #include "Osc.h"
-#include "Env.h"
+#include "Bob.h"
+
+int16_t waveTable[TABLE_SIZE]; // empty wavetable
+Osc aOsc1(waveTable);
+Bob filter;
+int16_t vol = 0; // 0 - 1024, 10 bit
+unsigned long msNow = millis();
+unsigned long breathTime = msNow;
+unsigned long buttonTime = msNow;
+int breathDelta = 5;
+int buttonDelta = 30;
+bool pinTouched [] = {false, false, false, false, false, false};
+int pitches [] = {60, 62, 64, 67, 69, 72};
+float prevAdc = 0;
+bool touchingSomething = false;
+
 #include "MultiControl.h"
-
-// Num of Touch pads for Multicontrol
-#define NUM_TOUCH_PADS 6 
-
-//** Setup touch for multicontrol
-MultiControl touchPin[NUM_TOUCH_PADS] = {
-  MultiControl (1, 0),
-  MultiControl (2, 0),
-  MultiControl (3, 0),
-  MultiControl (4, 0),
-  MultiControl (5, 0),
-  MultiControl (6, 0)
+MultiControl touchPin[6] {
+  MultiControl(1,0),
+  MultiControl(2,0),
+  MultiControl(3,0),
+  MultiControl(4,0),
+  MultiControl(5,0),
+  MultiControl(6,0)
 };
 
-
-//** Setup Pot pin for multicontrol 
-MultiControl volPotPin13(13, 1); // set pin 13 for volume potentiometer
-
-//** Flags for turning off button
-bool touchFlags[NUM_TOUCH_PADS] = {0,0,0,0,0,0};
-
-//** Audio Components
-int16_t waveTables[NUM_TOUCH_PADS][TABLE_SIZE]; // Wavetable for Oscilator
-Osc aOsci[NUM_TOUCH_PADS] = {
-  Osc(waveTables[0]),
-  Osc(waveTables[1]),
-  Osc(waveTables[2]),
-  Osc(waveTables[3]),
-  Osc(waveTables[4]),
-  Osc(waveTables[5])
-};
-
-Env ampEnv[NUM_TOUCH_PADS];
-
-// Const and Global Variables
-const int touchThreshold = 10; //Umbral del Sensor
-const int pitches[] = {69, 72, 74, 76, 78, 80}; // Base pitches for each touch pin
-int16_t volPot = 1000;  // Volume potentiometer
-unsigned long msNow, envTime, pitchTime;
-
-//** Init Osc and Envs
-void initAudioComponents() {
-  for(int i = 0; i < NUM_TOUCH_PADS; ++i){
-    Osc::sawGen(waveTables[i]);
-    ampEnv[i].setAttack(10);
-    ampEnv[i].setSustain(0.5);
-    ampEnv[i].setRelease(200);
-  }
-}
-
-//** Function to process touch input
-void handleTouch(int i, MultiControl &control, Osc &osc, Env &env, int pitch) {
-  int touchRaw = touchPin[i].readTouch();
-  if (touchRaw > touchThreshold) {
-    // Serial.println(touchRaw);
-    if (touchFlags[i] == 0) {
-      Serial.println("Touch detected on pin " + String(i));
-      // int pitch = pitchQuantize(48 + i, scale, 0);
-      // int pitch = pitches + random(4);
-      Serial.println("Pitch " + String(pitch));
-      osc.setPitch(pitch);
-      env.start();
-      touchFlags[i] = 1;
-    }  
-  } else {
-    if (touchFlags[i] == 1) {
-      Serial.println("Touch released on pin " + String(i));
-      env.startRelease();
-      touchFlags[i] = 0;
-    }
-  }
-}
-
-
+#include <Adafruit_ADS1X15.h>
+Adafruit_ADS1015 ads;
+ 
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("ESP32 - Flauta Magica");
-  // seti2sPins(16, 4, 21, 12); // Custom pins I2S
-  initAudioComponents();
+
+  ads.setGain(GAIN_EIGHT);      // 8x gain   +/- 0.512V  1 bit = 0.25mV   0.015625mV
+  if (!ads.begin()) {
+    Serial.println("Failed to initialize ADS.");
+    while (1);
+  }
+
+  Osc::sawGen(waveTable); // fill the wavetable
+  aOsc1.setPitch(69);
+  // seti2sPins(25, 27, 12, 21); // bck, ws, data_out, data_in // change ESP32 defaults
   audioStart();
 }
 
-
 void loop() {
-  // Touch Handler 
-  for (int i = 0; i < NUM_TOUCH_PADS; ++i) {
-    handleTouch(i, touchPin[i], aOsci[i], ampEnv[i], pitches[i]);
+  msNow = millis();
+
+  if ((unsigned long)(msNow - breathTime) >= breathDelta) {
+    breathTime += breathDelta;
+    int16_t adc0 = ads.readADC_SingleEnded(0);
+    if (!touchingSomething) adc0 = 0;
+    // float adcF = min(1.0f, adc0 / 700.0f); // 0.0 - 1.0
+    float adcF = (float)adc0 / 1000.0;
+    adcF = min(1.0f, max(adcF, float(0.0)));
+    Serial.print("adcF: "); Serial.println(adcF);
+    if (abs(adcF - prevAdc) > 0.03) {
+      if (adcF > prevAdc) {
+        adcF = pow(adcF, 0.7);
+      } else adcF = pow(adcF, 6);
+    }
+    adcF = slew(prevAdc, adcF, 0.2);
+    filter.setCutoff(adcF); // filter cutoff
+    prevAdc = adcF;
+    vol =  adcF * 1024;
   }
 
-  //** M16 audio s
-  msNow = millis();
-  
-  // // Pitch loop
-  // if (msNow > pitchTime) {
-  //   pitchTime = msNow + 1000;
-  // } 
-
-  // Env loop
-  if (msNow > envTime){
-    envTime = msNow + 1;
-    for (int i = 0; i < NUM_TOUCH_PADS; ++i){
-      ampEnv[i].next();
+  if ((unsigned long)(msNow - buttonTime) >= buttonDelta) {
+    buttonTime += buttonDelta;
+    touchingSomething = false;
+    for (int i=0; i<6; i++) {
+      int t = touchPin[i].isTouched();
+      if (t) touchingSomething = true;
+      if (t && !pinTouched[i]) {
+        int pitch = pitches[i];
+        aOsc1.setPitch(pitch);
+        Serial.println(pitch);
+        pinTouched[i] = true;
+      }
+      if (!t) {
+        pinTouched[i] = false;
+      }
     }
-  } 
-
-    // Vol Pot
-  // int16_t preVolPot = volPot;
-  // int16_t newVolPot = volPotPin13.readPot();
-  // if( newVolPot != preVolPot) {
-  //   volPot = newVolPot;
-  //   Serial.println("Vol pot: " + String(volPot));
-  // }
+  }
 }
 
 /* The audioUpdate function is required in all M16 programs 
@@ -125,15 +95,7 @@ void loop() {
 * Always finish with i2s_write_samples()
 */
 void audioUpdate() {
-  // int16_t oscVal = (aOsc1.next() * ampEnv1.getValue())>>16;
-  int32_t oscVal = 0;
-
-  // Sum oscillator outputs
-  for (int i = 0; i < NUM_TOUCH_PADS; ++i) {
-    oscVal += (aOsci[i].next() * ampEnv[i].getValue()) >> 18;
-  }
-
-  int16_t leftVal = (oscVal * volPot)>>10;
-  int16_t rightVal = leftVal;
+  int32_t leftVal = (aOsc1.next() * vol)>>10;
+  int32_t rightVal = leftVal;
   i2s_write_samples(leftVal, rightVal);
 }
